@@ -15,8 +15,8 @@ from telegram.ext import (
 import yt_dlp
 
 # ---------------- CONFIG ----------------
-print("BOT_TOKEN =", os.getenv("BOT_TOKEN"))
-ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_ID = os.getenv('ADMIN_ID')
 
 if not BOT_TOKEN:
     raise Exception("BOT_TOKEN غير موجود في البيئة")
