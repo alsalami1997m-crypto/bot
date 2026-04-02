@@ -4,31 +4,36 @@ import sqlite3
 import asyncio
 import time
 from datetime import datetime
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler,
     MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
 )
+
 import yt_dlp
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_ID = os.getenv('ADMIN_ID')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
 
-if not TOKEN:
+if not BOT_TOKEN:
     raise Exception("BOT_TOKEN غير موجود في البيئة")
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("bot_data.db", check_same_thread=False)
 
 def db_execute(query, params=(), fetch=False):
-    cursor = conn.cursor()
-    cursor.execute(query, params)
-    conn.commit()
-    if fetch:
-        return cursor.fetchall()
-    return None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        if fetch:
+            return cursor.fetchall()
+    except Exception as e:
+        print("DB ERROR:", e)
+        return [] if fetch else None
 
 # tables
 db_execute("""CREATE TABLE IF NOT EXISTS users (
@@ -67,10 +72,11 @@ async def is_subscribed(bot, user_id):
 
     for (channel,) in channels:
         try:
-            member = await bot.get_chat_member(channel, user_id)
+            member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
             if member.status in ["left", "kicked"]:
                 return False
-        except:
+        except Exception as e:
+            print("SUB CHECK ERROR:", e)
             return False
 
     return True
@@ -79,27 +85,15 @@ async def is_subscribed(bot, user_id):
 def admin_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 المستخدمين", callback_data="users"),
-         InlineKeyboardButton("⏳ الطلبات", callback_data="pending")],
+         InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
 
-        [InlineKeyboardButton("📊 الإحصائيات", callback_data="stats"),
-         InlineKeyboardButton("🔍 بحث مستخدم", callback_data="search_user")],
-
-        [InlineKeyboardButton("📢 رسالة جماعية", callback_data="broadcast"),
-         InlineKeyboardButton("🚫 حظر مستخدم", callback_data="ban_user")],
-
-        [InlineKeyboardButton("🔓 فك حظر", callback_data="unban_user"),
-         InlineKeyboardButton("🧾 معلومات مستخدم", callback_data="user_info")],
+        [InlineKeyboardButton("📢 رسالة جماعية", callback_data="broadcast")],
 
         [InlineKeyboardButton("📣 القنوات", callback_data="channels"),
          InlineKeyboardButton("➕ إضافة قناة", callback_data="add_channel")],
 
-        [InlineKeyboardButton("❌ حذف قناة", callback_data="remove_channel"),
-         InlineKeyboardButton("⚙️ الاشتراك الإجباري", callback_data="force_menu")],
-
-        [InlineKeyboardButton("✅ تفعيل الاشتراك", callback_data="enable_force"),
-         InlineKeyboardButton("❎ تعطيل الاشتراك", callback_data="disable_force")],
-
-        [InlineKeyboardButton("🔄 تحديث", callback_data="refresh")]
+        [InlineKeyboardButton("⚙️ تفعيل الاشتراك", callback_data="enable_force"),
+         InlineKeyboardButton("❎ تعطيل الاشتراك", callback_data="disable_force")]
     ])
 
 # ---------------- START ----------------
@@ -114,7 +108,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لوحة التحكم 👇", reply_markup=admin_keyboard())
         return
 
-    force_sub = db_execute("SELECT value FROM settings WHERE key='force_sub'", fetch=True)[0][0]
+    force_sub_row = db_execute("SELECT value FROM settings WHERE key='force_sub'", fetch=True)
+    force_sub = force_sub_row[0][0] if force_sub_row else "0"
 
     if force_sub == '1':
         if not await is_subscribed(context.bot, user_id):
@@ -176,6 +171,8 @@ async def download_video(url, update, context):
             info = ydl.extract_info(url, download=True)
             return ydl.prepare_filename(info)
 
+    filename = None
+
     try:
         filename = await loop.run_in_executor(None, run)
 
@@ -189,11 +186,11 @@ async def download_video(url, update, context):
         db_execute("UPDATE users SET downloads=downloads+1 WHERE id=?", (user_id,))
 
     except Exception as e:
-        print(e)
+        print("DOWNLOAD ERROR:", e)
         await update.message.reply_text("❌ فشل التحميل")
 
     finally:
-        if os.path.exists(filename):
+        if filename and os.path.exists(filename):
             os.remove(filename)
 
 # ---------------- TEXT ----------------
@@ -214,23 +211,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in user_state:
         state = user_state[user_id]
 
-        if state == "search":
-            user = db_execute("SELECT * FROM users WHERE id=?", (text,), fetch=True)
-            await update.message.reply_text(str(user[0]) if user else "غير موجود")
-
-        elif state == "ban":
-            db_execute("UPDATE users SET banned=1 WHERE id=?", (text,))
-            await update.message.reply_text("🚫 تم الحظر")
-
-        elif state == "unban":
-            db_execute("UPDATE users SET banned=0 WHERE id=?", (text,))
-            await update.message.reply_text("✅ تم فك الحظر")
-
-        elif state == "broadcast":
+        if state == "broadcast":
             users = db_execute("SELECT id FROM users", fetch=True)
             for (uid,) in users:
                 try:
-                    await context.bot.send_message(uid, text)
+                    await context.bot.send_message(chat_id=uid, text=text)
                 except:
                     pass
             await update.message.reply_text("📢 تم الإرسال")
@@ -249,12 +234,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ جاري التحميل...")
     await download_video(text, update, context)
 
+# ---------------- CALLBACK ----------------
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    uid = query.from_user.id
+    data = query.data
+
+    if uid != ADMIN_ID:
+        await query.answer("❌ ليس لديك صلاحية", show_alert=True)
+        return
+
+    if data == "broadcast":
+        user_state[uid] = "broadcast"
+        await query.message.reply_text("✉️ أرسل الرسالة الآن")
+        return
+
+    if data == "users":
+        users = db_execute("SELECT COUNT(*) FROM users", fetch=True)
+        count = users[0][0] if users else 0
+        await query.message.reply_text(f"👥 عدد المستخدمين: {count}")
+        return
+
+    if data == "enable_force":
+        db_execute("UPDATE settings SET value='1' WHERE key='force_sub'")
+        await query.message.reply_text("✅ تم تفعيل الاشتراك الإجباري")
+        return
+
+    if data == "disable_force":
+        db_execute("UPDATE settings SET value='0' WHERE key='force_sub'")
+        await query.message.reply_text("❎ تم تعطيل الاشتراك")
+        return
+
 # ---------------- RUN ----------------
-app = ApplicationBuilder().token(TOKEN).build()
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(lambda u, c: None))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-print("Bot is running...")
-app.run_polling()
+    print("🚀 Bot is running...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
