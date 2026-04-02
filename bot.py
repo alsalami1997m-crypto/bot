@@ -15,11 +15,14 @@ from telegram.ext import (
 import yt_dlp
 
 # ---------------- CONFIG ----------------
-ADMIN_ID = os.getenv('ADMIN_ID')
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
 
-if BOT_TOKEN is None:
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
     raise Exception("BOT_TOKEN غير موجود في البيئة")
+
+BOT_TOKEN = BOT_TOKEN.strip()
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("bot_data.db", check_same_thread=False)
@@ -269,6 +272,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- RUN ----------------
 def main():
+    print("TOKEN LENGTH:", len(BOT_TOKEN))
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
