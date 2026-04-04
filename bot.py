@@ -20,8 +20,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ---------------- CONFIG ----------------
 ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
+print("TOKEN:", BOT_TOKEN)
 if not BOT_TOKEN:
     raise Exception("BOT_TOKEN غير موجود في البيئة")
 
