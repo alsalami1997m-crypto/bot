@@ -17,27 +17,34 @@ import yt_dlp
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ---------------- CONFIG ----------------
+# ---------------- ENV CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-print("TOKEN:", BOT_TOKEN)  # 👈 هنا تحطه بعد التعريف
+ADMIN_ID_RAW = os.getenv("ADMIN_ID")
 
 if not BOT_TOKEN:
-    raise Exception("BOT_TOKEN غير موجود في البيئة")
+    raise Exception("❌ BOT_TOKEN غير موجود في متغيرات البيئة")
+
+if not ADMIN_ID_RAW:
+    raise Exception("❌ ADMIN_ID غير موجود في متغيرات البيئة")
+
+try:
+    ADMIN_ID = int(ADMIN_ID_RAW)
+except:
+    raise Exception("❌ ADMIN_ID يجب أن يكون رقم")
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("bot_data.db", check_same_thread=False)
 
 def db_execute(query, params=(), fetch=False):
     try:
-        cursor = conn.cursor()
-        cursor.execute(query, params)
+        cur = conn.cursor()
+        cur.execute(query, params)
         conn.commit()
-        if fetch:
-            return cursor.fetchall()
+        return cur.fetchall() if fetch else None
     except Exception as e:
-        print("DB ERROR:", e)
+        logger.error(f"DB ERROR: {e}")
         return [] if fetch else None
 
 # ---------------- TABLES ----------------
@@ -81,7 +88,7 @@ async def is_subscribed(bot, user_id):
             if member.status in ["left", "kicked"]:
                 return False
         except Exception as e:
-            print("SUB CHECK ERROR:", e)
+            logger.error(f"SUB CHECK ERROR: {e}")
             return False
 
     return True
@@ -109,19 +116,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
 
+    # Admin panel
     if user_id == ADMIN_ID:
         await update.message.reply_text("لوحة التحكم 👇", reply_markup=admin_keyboard())
         return
 
-    force_sub_row = db_execute("SELECT value FROM settings WHERE key='force_sub'", fetch=True)
-    force_sub = force_sub_row[0][0] if force_sub_row else "0"
+    # Force subscribe check
+    force_sub = db_execute("SELECT value FROM settings WHERE key='force_sub'", fetch=True)
+    force_sub = force_sub[0][0] if force_sub else "0"
 
-    if force_sub == '1':
+    if force_sub == "1":
         if not await is_subscribed(context.bot, user_id):
             channels = db_execute("SELECT channel FROM channels", fetch=True)
 
             buttons = []
-            text = "❌ يجب الاشتراك:\n\n"
+            text = "❌ يجب الاشتراك بالقنوات التالية:\n\n"
 
             for (ch,) in channels:
                 text += f"- {ch}\n"
@@ -132,6 +141,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
             return
 
+    # User check
     row = db_execute("SELECT approved,banned FROM users WHERE id=?", (user_id,), fetch=True)
 
     if not row:
@@ -145,18 +155,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             datetime.now().strftime("%Y-%m-%d")
         ))
 
-        await context.bot.send_message(ADMIN_ID, f"طلب جديد: {user_id}")
-        await update.message.reply_text("⏳ بانتظار الموافقة")
+        await context.bot.send_message(ADMIN_ID, f"👤 مستخدم جديد: {user_id}")
+        await update.message.reply_text("⏳ بانتظار الموافقة من الإدارة")
         return
 
     approved, banned = row[0]
 
     if banned:
-        await update.message.reply_text("🚫 محظور")
+        await update.message.reply_text("🚫 تم حظرك من البوت")
     elif approved:
-        await update.message.reply_text("📎 أرسل الرابط")
+        await update.message.reply_text("📎 أرسل الرابط لتحميل الفيديو")
     else:
-        await update.message.reply_text("⏳ بانتظار الموافقة")
+        await update.message.reply_text("⏳ حسابك قيد المراجعة")
 
 # ---------------- DOWNLOAD ----------------
 async def download_video(url, update, context):
@@ -182,7 +192,7 @@ async def download_video(url, update, context):
         filename = await loop.run_in_executor(None, run)
 
         if os.path.getsize(filename) > 49 * 1024 * 1024:
-            await update.message.reply_text("❗ الملف كبير جداً")
+            await update.message.reply_text("❗ الملف أكبر من 50MB")
             return
 
         with open(filename, 'rb') as v:
@@ -191,14 +201,14 @@ async def download_video(url, update, context):
         db_execute("UPDATE users SET downloads=downloads+1 WHERE id=?", (user_id,))
 
     except Exception as e:
-        print("DOWNLOAD ERROR:", e)
-        await update.message.reply_text("❌ فشل التحميل")
+        logger.error(f"DOWNLOAD ERROR: {e}")
+        await update.message.reply_text("❌ حدث خطأ أثناء التحميل")
 
     finally:
         if filename and os.path.exists(filename):
             os.remove(filename)
 
-# ---------------- TEXT ----------------
+# ---------------- TEXT HANDLER ----------------
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
@@ -206,6 +216,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
 
+    # Anti spam
     if user_id in last_request:
         if time.time() - last_request[user_id] < 5:
             await update.message.reply_text("⏳ انتظر قليلاً")
@@ -213,22 +224,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     last_request[user_id] = time.time()
 
-    # broadcast
-    if user_id in user_state:
-        state = user_state[user_id]
+    # Broadcast mode
+    if user_id in user_state and user_state[user_id] == "broadcast":
+        users = db_execute("SELECT id FROM users", fetch=True)
 
-        if state == "broadcast":
-            users = db_execute("SELECT id FROM users", fetch=True)
-            for (uid,) in users:
-                try:
-                    await context.bot.send_message(chat_id=uid, text=text)
-                except:
-                    pass
-            await update.message.reply_text("📢 تم الإرسال")
+        for (uid,) in users:
+            try:
+                await context.bot.send_message(chat_id=uid, text=text)
+            except:
+                pass
 
+        await update.message.reply_text("📢 تم إرسال الرسالة")
         del user_state[user_id]
         return
 
+    # URL check
     if not text.startswith(("http://", "https://")):
         return
 
@@ -249,7 +259,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if uid != ADMIN_ID:
-        await query.answer("❌ ليس لديك صلاحية", show_alert=True)
+        await query.answer("❌ غير مصرح", show_alert=True)
         return
 
     if data == "broadcast":
@@ -258,8 +268,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "users":
-        users = db_execute("SELECT COUNT(*) FROM users", fetch=True)
-        count = users[0][0] if users else 0
+        count = db_execute("SELECT COUNT(*) FROM users", fetch=True)[0][0]
         await query.message.reply_text(f"👥 عدد المستخدمين: {count}")
         return
 
@@ -270,12 +279,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "disable_force":
         db_execute("UPDATE settings SET value='0' WHERE key='force_sub'")
-        await query.message.reply_text("❎ تم تعطيل الاشتراك")
+        await query.message.reply_text("❎ تم تعطيل الاشتراك الإجباري")
         return
 
-# ---------------- RUN ----------------
+# ---------------- MAIN ----------------
 def main():
-    print("🚀 Bot is running...")
+    logger.info("🚀 Bot is running...")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -283,7 +292,6 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # 🔥 التعديل المهم لـ Railway
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
