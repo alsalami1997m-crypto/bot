@@ -19,12 +19,12 @@ import yt_dlp
 logging.basicConfig(level=logging.INFO)
 
 # ---------------- CONFIG ----------------
-ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
-print("TOKEN:", BOT_TOKEN)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+print("TOKEN:", BOT_TOKEN)  # 👈 هنا تحطه بعد التعريف
+
 if not BOT_TOKEN:
     raise Exception("BOT_TOKEN غير موجود في البيئة")
-
-BOT_TOKEN = BOT_TOKEN.strip()
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("bot_data.db", check_same_thread=False)
