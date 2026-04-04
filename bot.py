@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------- ENV CONFIG ----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+print("TOKEN LOADED:", BOT_TOKEN is not None)
 ADMIN_ID_RAW = os.getenv("ADMIN_ID")
 
 if not BOT_TOKEN:
