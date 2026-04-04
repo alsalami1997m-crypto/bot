@@ -5,24 +5,24 @@ import asyncio
 import time
 from datetime import datetime
 
+from flask import Flask, request
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler,
     MessageHandler, CallbackQueryHandler,
-    filters, ContextTypes
+    ContextTypes, filters
 )
 
 import yt_dlp
 
 # ---------------- CONFIG ----------------
 ADMIN_ID = int(os.getenv('ADMIN_ID', 0))
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 if not BOT_TOKEN:
-    raise Exception("BOT_TOKEN غير موجود في البيئة")
-
-BOT_TOKEN = BOT_TOKEN.strip()
+    raise Exception("BOT_TOKEN غير موجود")
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("bot_data.db", check_same_thread=False)
@@ -36,9 +36,9 @@ def db_execute(query, params=(), fetch=False):
             return cursor.fetchall()
     except Exception as e:
         print("DB ERROR:", e)
-        return [] if fetch else None
+        return []
 
-# tables
+# ---------------- TABLES ----------------
 db_execute("""CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     username TEXT,
@@ -69,7 +69,6 @@ last_request = {}
 # ---------------- FORCE SUB ----------------
 async def is_subscribed(bot, user_id):
     channels = db_execute("SELECT channel FROM channels", fetch=True)
-
     if not channels:
         return True
 
@@ -78,10 +77,8 @@ async def is_subscribed(bot, user_id):
             member = await bot.get_chat_member(chat_id=channel, user_id=user_id)
             if member.status in ["left", "kicked"]:
                 return False
-        except Exception as e:
-            print("SUB CHECK ERROR:", e)
+        except:
             return False
-
     return True
 
 # ---------------- ADMIN KEYBOARD ----------------
@@ -89,12 +86,9 @@ def admin_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 المستخدمين", callback_data="users"),
          InlineKeyboardButton("📊 الإحصائيات", callback_data="stats")],
-
         [InlineKeyboardButton("📢 رسالة جماعية", callback_data="broadcast")],
-
         [InlineKeyboardButton("📣 القنوات", callback_data="channels"),
          InlineKeyboardButton("➕ إضافة قناة", callback_data="add_channel")],
-
         [InlineKeyboardButton("⚙️ تفعيل الاشتراك", callback_data="enable_force"),
          InlineKeyboardButton("❎ تعطيل الاشتراك", callback_data="disable_force")]
     ])
@@ -111,37 +105,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لوحة التحكم 👇", reply_markup=admin_keyboard())
         return
 
-    force_sub_row = db_execute("SELECT value FROM settings WHERE key='force_sub'", fetch=True)
-    force_sub = force_sub_row[0][0] if force_sub_row else "0"
-
-    if force_sub == '1':
-        if not await is_subscribed(context.bot, user_id):
-            channels = db_execute("SELECT channel FROM channels", fetch=True)
-
-            buttons = []
-            text = "❌ يجب الاشتراك:\n\n"
-
-            for (ch,) in channels:
-                text += f"- {ch}\n"
-                buttons.append([InlineKeyboardButton(ch, url=f"https://t.me/{ch.replace('@','')}")])
-
-            buttons.append([InlineKeyboardButton("✅ تحقق", callback_data="check_sub")])
-
-            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-            return
-
     row = db_execute("SELECT approved,banned FROM users WHERE id=?", (user_id,), fetch=True)
 
     if not row:
-        db_execute("""INSERT INTO users (id, username, first_name, last_name, approved, banned, join_date, downloads)
-        VALUES (?, ?, ?, ?, 0, 0, ?, 0)""",
-        (
-            user_id,
-            user.username or "",
-            user.first_name or "",
-            user.last_name or "",
-            datetime.now().strftime("%Y-%m-%d")
-        ))
+        db_execute("""INSERT INTO users VALUES (?, ?, ?, ?, 0, 0, ?, 0)""",
+        (user_id, user.username, user.first_name, user.last_name, datetime.now().strftime("%Y-%m-%d")))
 
         await context.bot.send_message(ADMIN_ID, f"طلب جديد: {user_id}")
         await update.message.reply_text("⏳ بانتظار الموافقة")
@@ -161,11 +129,7 @@ async def download_video(url, update, context):
     user_id = update.message.from_user.id
     file_id = str(uuid.uuid4())
 
-    ydl_opts = {
-        'outtmpl': f"{file_id}.%(ext)s",
-        'format': 'best',
-        'quiet': True
-    }
+    ydl_opts = {'outtmpl': f"{file_id}.%(ext)s", 'format': 'best', 'quiet': True}
 
     loop = asyncio.get_event_loop()
 
@@ -180,7 +144,7 @@ async def download_video(url, update, context):
         filename = await loop.run_in_executor(None, run)
 
         if os.path.getsize(filename) > 49 * 1024 * 1024:
-            await update.message.reply_text("❗ الملف كبير جداً")
+            await update.message.reply_text("❗ الملف كبير")
             return
 
         with open(filename, 'rb') as v:
@@ -188,8 +152,7 @@ async def download_video(url, update, context):
 
         db_execute("UPDATE users SET downloads=downloads+1 WHERE id=?", (user_id,))
 
-    except Exception as e:
-        print("DOWNLOAD ERROR:", e)
+    except:
         await update.message.reply_text("❌ فشل التحميل")
 
     finally:
@@ -204,34 +167,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     text = update.message.text
 
-    if user_id in last_request:
-        if time.time() - last_request[user_id] < 5:
-            await update.message.reply_text("⏳ انتظر قليلاً")
-            return
+    if user_id in last_request and time.time() - last_request[user_id] < 5:
+        await update.message.reply_text("⏳ انتظر")
+        return
 
     last_request[user_id] = time.time()
 
-    if user_id in user_state:
-        state = user_state[user_id]
-
-        if state == "broadcast":
-            users = db_execute("SELECT id FROM users", fetch=True)
-            for (uid,) in users:
-                try:
-                    await context.bot.send_message(chat_id=uid, text=text)
-                except:
-                    pass
-            await update.message.reply_text("📢 تم الإرسال")
-
-        del user_state[user_id]
-        return
-
     if not text.startswith(("http://", "https://")):
-        return
-
-    row = db_execute("SELECT approved,banned FROM users WHERE id=?", (user_id,), fetch=True)
-
-    if not row or row[0][1] or not row[0][0]:
         return
 
     await update.message.reply_text("⏳ جاري التحميل...")
@@ -242,45 +184,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    uid = query.from_user.id
-    data = query.data
-
-    if uid != ADMIN_ID:
-        await query.answer("❌ ليس لديك صلاحية", show_alert=True)
+    if query.from_user.id != ADMIN_ID:
         return
 
-    if data == "broadcast":
-        user_state[uid] = "broadcast"
-        await query.message.reply_text("✉️ أرسل الرسالة الآن")
-        return
+    if query.data == "broadcast":
+        user_state[query.from_user.id] = "broadcast"
+        await query.message.reply_text("✉️ أرسل الرسالة")
 
-    if data == "users":
-        users = db_execute("SELECT COUNT(*) FROM users", fetch=True)
-        count = users[0][0] if users else 0
-        await query.message.reply_text(f"👥 عدد المستخدمين: {count}")
-        return
+# ---------------- APP ----------------
+app = Flask(__name__)
 
-    if data == "enable_force":
-        db_execute("UPDATE settings SET value='1' WHERE key='force_sub'")
-        await query.message.reply_text("✅ تم تفعيل الاشتراك الإجباري")
-        return
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    if data == "disable_force":
-        db_execute("UPDATE settings SET value='0' WHERE key='force_sub'")
-        await query.message.reply_text("❎ تم تعطيل الاشتراك")
-        return
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CallbackQueryHandler(callback_handler))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-# ---------------- RUN ----------------
-def main():
-    print("TOKEN LENGTH:", len(BOT_TOKEN))
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+async def webhook():
+    data = request.get_json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "ok"
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+@app.route("/")
+def home():
+    return "Bot is running"
 
-    print("🚀 Bot is running...")
-    app.run_polling()
-
+# ---------------- START SERVER ----------------
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 10000))
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(
+        telegram_app.bot.set_webhook(f"{RENDER_URL}/{BOT_TOKEN}")
+    )
+
+    app.run(host="0.0.0.0", port=port)
